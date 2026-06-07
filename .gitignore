@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+workspace/
+history.json
+.env
+logs/
