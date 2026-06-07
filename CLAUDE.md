@@ -1,29 +1,29 @@
 # telegram_dev_bot
 
-텔레그램으로 Claude(claude-sonnet-4-6)와 대화하며 코드를 생성/실행/수정하는 개발용 봇.
+텔레그램으로 PC에 등록된 프로젝트(프로그램)를 원격에서 실행/중지/모니터링하는 제어용 봇.
 
 ## 구조
-- `bot.py` — 텔레그램 봇 진입점 (python-telegram-bot 20.x). 명령어 처리, 메시지 핸들링, 인라인 키보드를 통한 코드 실행 흐름 관리
-- `claude_client.py` — anthropic SDK 래퍼. 시스템 프롬프트 정의, 멀티턴 대화 요청, 응답에서 ```python 코드 블록 추출
-- `context_manager.py` — 멀티턴 대화 히스토리 관리 (리스트 기반, JSON 파일로 영속화)
-- `executor.py` — workspace/ 폴더에 코드 저장 후 subprocess로 실행, 타임아웃/강제종료 지원
-- `workspace/` — 생성된 코드 파일이 타임스탬프 이름으로 저장되는 위치 (실행 시 자동 생성)
-- `history.json` — 대화 히스토리 영속화 파일 (실행 시 자동 생성)
+- `bot.py` — 텔레그램 봇 진입점 (python-telegram-bot 20.x). 명령어 처리 및 단일 사용자 인증
+- `config.py` — 원격 제어 대상 프로젝트 목록(PROJECTS)을 중앙에서 관리
+- `executor.py` — 등록된 프로젝트를 백그라운드로 실행/중지하고, 프로세스를 딕셔너리로 관리, 로그를 logs/ 폴더에 날짜별로 기록
+- `logs/` — 프로젝트별 실행 로그가 날짜별 파일로 저장되는 위치 (실행 시 자동 생성)
 
 ## 동작 흐름
-1. 사용자가 텔레그램 메시지 전송 → ALLOWED_USER_ID로 단일 사용자 인증
-2. `context_manager`에 누적된 히스토리와 함께 `claude_client`로 Claude에 질의
-3. 응답에 ```python 코드 블록이 있으면 인라인 키보드([▶️ 실행] [⏭️ 건너뜀])로 실행 여부 확인
-4. 실행 시 `executor`가 코드를 저장/실행하고 결과(stdout/stderr/returncode)를 다시 히스토리에 추가
-5. Claude가 실행 결과를 분석하고 개선안을 제시 (반복 가능)
+1. 사용자가 텔레그램 메시지(명령어) 전송 → ALLOWED_USER_ID로 단일 사용자 인증
+2. `/projects` — 등록된 프로젝트 목록과 실행 상태(🟢 실행 중 / ⚪ 중지됨) 확인
+3. `/run <프로젝트명>` — `config.py`에 등록된 진입점 파일을 subprocess로 백그라운드 실행, 출력은 logs/에 기록
+4. `/stop <프로젝트명>` — 실행 중인 프로세스를 강제 종료
+5. `/log <프로젝트명>` — 최근 로그 50줄을 텔레그램으로 전송
+6. timeout이 설정된 프로젝트는 주기적으로(60초마다) 실행 시간을 점검해 초과 시 자동 종료
 
 ## 환경변수 (.env)
 - `TELEGRAM_TOKEN` — 텔레그램 봇 토큰
-- `ANTHROPIC_API_KEY` — Anthropic API 키
 - `ALLOWED_USER_ID` — 봇 사용을 허용할 텔레그램 사용자 ID (단일 사용자 제한)
 
 ## 코딩 규칙
 - 모든 주석은 한국어로 작성
 - 환경변수는 반드시 `python-dotenv`의 `load_dotenv()`로 로드
 - 외부 호출/IO/서브프로세스 등은 try/except로 에러 처리
+- 모든 경로는 `pathlib.Path` 사용
 - 각 파일 상단에 역할 설명 주석 포함
+- 에러 발생 시 텔레그램으로 즉시 알림

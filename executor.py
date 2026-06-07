@@ -1,67 +1,121 @@
 # executor.py
-# Claude가 생성한 코드를 workspace/ 폴더에 저장하고 실행하는 모듈
-# 타임스탬프 기반 파일명을 자동 생성하며, 실행 중인 프로세스를 강제 종료하는 기능도 제공한다.
+# config.py에 등록된 프로젝트를 원격에서 실행/중지/모니터링하는 모듈
+# 프로젝트별 프로세스를 딕셔너리로 관리하여 여러 프로젝트를 동시에 실행할 수 있다.
+# 각 프로젝트의 실행 로그는 logs/ 폴더에 날짜별 파일로 누적 저장된다.
 
-import os
 import subprocess
 import time
+from pathlib import Path
 
-WORKSPACE_DIR = "workspace"
+LOGS_DIR = Path("logs")
 
 
-class Executor:
-    def __init__(self, workspace_dir=WORKSPACE_DIR):
-        self.workspace_dir = workspace_dir
-        os.makedirs(self.workspace_dir, exist_ok=True)
-        self.current_process = None
+class ProjectExecutor:
+    def __init__(self, logs_dir=LOGS_DIR):
+        self.logs_dir = Path(logs_dir)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        # 프로젝트명 -> {"process", "log_file", "log_path", "started_at", "timeout"}
+        self.processes = {}
 
-    def save_code(self, code, prefix="code"):
-        """코드를 타임스탬프가 포함된 파일명으로 workspace/ 에 저장하고 경로를 반환한다."""
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{prefix}_{timestamp}.py"
-        filepath = os.path.join(self.workspace_dir, filename)
+    def _log_path(self, project_name):
+        """프로젝트명과 오늘 날짜를 기준으로 로그 파일 경로를 생성한다."""
+        date_str = time.strftime("%Y%m%d")
+        return self.logs_dir / f"{project_name}_{date_str}.log"
+
+    def is_running(self, project_name):
+        """해당 프로젝트가 현재 실행 중인지 확인한다."""
+        info = self.processes.get(project_name)
+        if not info:
+            return False
+        return info["process"].poll() is None
+
+    def run(self, project_name, entry_path, timeout=None):
+        """프로젝트를 백그라운드로 실행하고 출력을 로그 파일에 기록한다. 로그 파일 경로를 반환한다."""
+        if self.is_running(project_name):
+            raise RuntimeError(f"'{project_name}'은(는) 이미 실행 중입니다.")
+
+        entry_path = Path(entry_path).resolve()
+        if not entry_path.exists():
+            raise FileNotFoundError(f"진입점 파일을 찾을 수 없습니다: {entry_path}")
+
+        log_path = self._log_path(project_name)
         try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(code)
-        except Exception as e:
-            raise RuntimeError(f"코드 저장 중 오류 발생: {e}")
-        return filepath
+            log_file = open(log_path, "a", encoding="utf-8")
+            log_file.write(f"\n===== 실행 시작: {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            log_file.flush()
 
-    def run(self, filepath, timeout=60):
-        """지정된 파일을 python으로 실행하고 (stdout, stderr, returncode)를 반환한다."""
-        try:
-            self.current_process = subprocess.Popen(
-                ["python3", filepath],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            process = subprocess.Popen(
+                ["python", str(entry_path)],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=str(entry_path.parent),
                 text=True,
             )
-            try:
-                stdout, stderr = self.current_process.communicate(timeout=timeout)
-                returncode = self.current_process.returncode
-            except subprocess.TimeoutExpired:
-                self.kill()
-                stdout, stderr = "", f"실행 시간이 {timeout}초를 초과하여 강제 종료되었습니다."
-                returncode = -1
-            return stdout, stderr, returncode
         except Exception as e:
-            return "", f"코드 실행 중 오류 발생: {e}", -1
-        finally:
-            self.current_process = None
+            raise RuntimeError(f"'{project_name}' 실행 중 오류 발생: {e}")
 
-    def kill(self):
-        """현재 실행 중인 프로세스를 강제 종료한다."""
-        if self.current_process and self.current_process.poll() is None:
-            try:
-                self.current_process.kill()
-                self.current_process.wait()
-            except Exception as e:
-                print(f"[Executor] 프로세스 종료 중 오류 발생: {e}")
+        self.processes[project_name] = {
+            "process": process,
+            "log_file": log_file,
+            "log_path": log_path,
+            "started_at": time.time(),
+            "timeout": timeout,
+        }
+        return log_path
 
-    def list_files(self):
-        """workspace/ 폴더 내 파일 목록을 반환한다."""
+    def kill(self, project_name):
+        """실행 중인 프로젝트의 프로세스를 강제 종료한다."""
+        info = self.processes.get(project_name)
+        if not info or info["process"].poll() is not None:
+            self._cleanup(project_name)
+            raise RuntimeError(f"'{project_name}'은(는) 실행 중이 아닙니다.")
         try:
-            return sorted(os.listdir(self.workspace_dir))
+            info["process"].kill()
+            info["process"].wait()
+            info["log_file"].write(f"===== 강제 종료: {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
         except Exception as e:
-            print(f"[Executor] 파일 목록 조회 중 오류 발생: {e}")
-            return []
+            raise RuntimeError(f"'{project_name}' 종료 중 오류 발생: {e}")
+        finally:
+            self._cleanup(project_name)
+
+    def _cleanup(self, project_name):
+        """종료된 프로세스 정보를 정리하고 로그 파일 핸들을 닫는다."""
+        info = self.processes.pop(project_name, None)
+        if info:
+            try:
+                info["log_file"].close()
+            except Exception:
+                pass
+
+    def check_timeouts(self):
+        """timeout이 설정된 프로젝트 중 실행 시간이 초과된 프로세스를 자동 종료한다."""
+        for name in list(self.processes.keys()):
+            info = self.processes.get(name)
+            if not info:
+                continue
+            if info["process"].poll() is not None:
+                self._cleanup(name)
+                continue
+            if info["timeout"] is None:
+                continue
+            elapsed = time.time() - info["started_at"]
+            if elapsed > info["timeout"]:
+                try:
+                    self.kill(name)
+                except Exception as e:
+                    print(f"[ProjectExecutor] '{name}' 타임아웃 종료 중 오류 발생: {e}")
+
+    def tail_log(self, project_name, lines=50):
+        """프로젝트의 가장 최근 로그 파일에서 마지막 N줄을 반환한다. 로그가 없으면 None을 반환한다."""
+        log_path = self._log_path(project_name)
+        if not log_path.exists():
+            candidates = sorted(self.logs_dir.glob(f"{project_name}_*.log"))
+            if not candidates:
+                return None
+            log_path = candidates[-1]
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                content = f.readlines()
+            return "".join(content[-lines:]) or "(로그 내용 없음)"
+        except Exception as e:
+            raise RuntimeError(f"로그 조회 중 오류 발생: {e}")
