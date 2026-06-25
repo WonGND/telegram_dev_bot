@@ -230,12 +230,22 @@ async def monthly_rebalance_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         # --dry-run 제거 → 실거래 리밸런스
         run_args = [a for a in (project.get("args") or []) if a != "--dry-run"]
-        log_path = await asyncio.to_thread(
+        await asyncio.to_thread(
             executor.run, "us_rotation", project["path"], project.get("timeout"),
             project.get("python"), run_args)
-        msg = (f"📅 월간 자동 리밸런스 실행\n"
-               f"미국 주식 모멘텀 로테이션(top20) 리밸런스를 시작했습니다.\n"
-               f"결과 확인: /log us_rotation\n로그: {log_path}")
+        # run()은 백그라운드 실행이라 직후 로그가 비어 있다.
+        # 실행이 끝날 때까지 기다린 뒤 로그를 읽어 알림 본문에 직접 포함한다.
+        await asyncio.to_thread(executor.wait_for, "us_rotation", 600)
+        log_text = await asyncio.to_thread(executor.tail_log, "us_rotation", 40)
+        body = (log_text or "").strip()
+        if "===== 실행 시작" in body:
+            body = body[body.rindex("===== 실행 시작"):]
+        body = body or "(로그 내용 없음)"
+        msg = (f"📅 월간 자동 리밸런스 실행 완료\n"
+               f"미국 주식 모멘텀 로테이션(top20)\n\n{body}")
+        # 텔레그램 메시지 길이 제한(4096자) 대비 안전 컷
+        if len(msg) > 3500:
+            msg = msg[:3500] + "\n…(이하 생략 — 전체는 /log us_rotation)"
     except Exception as e:
         msg = f"⚠️ 월간 리밸런스 실행 오류: {e}"
     try:
