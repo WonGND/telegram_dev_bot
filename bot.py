@@ -4,8 +4,12 @@
 # config.py의 PROJECTS에 등록된 프로그램을 /run, /stop, /log, /projects 명령으로 원격 제어한다.
 
 import asyncio
+import atexit
+import ctypes
 import logging
 import os
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -21,6 +25,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# httpx는 INFO 레벨에서 요청 URL을 그대로 로그에 남기는데, 텔레그램 토큰이
+# URL(/bot<token>/...)에 포함돼 로그에 노출된다. WARNING으로 올려 토큰 유출을 막는다.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -29,6 +36,59 @@ ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
 MAX_MESSAGE_LENGTH = 4000
 
 executor = ProjectExecutor()
+
+
+# ── 단일 인스턴스 잠금 (lockfile) ─────────────────────────────────
+# 같은 토큰으로 dev 봇이 2개 이상 동시에 폴링하면 getUpdates Conflict(폴링 충돌)가
+# 발생한다(서로 getUpdates를 끊는 poll-war). 시작 시 dev_bot.lock에 PID를 기록하고,
+# 이미 살아있는 PID가 있으면 즉시 종료해 중복 실행을 막는다. (2026-06-25 중복 폴링 사고 후 추가)
+LOCK_FILE = Path(__file__).with_name("dev_bot.lock")
+_STILL_ACTIVE = 259
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _pid_alive(pid: int) -> bool:
+    """해당 PID의 프로세스가 아직 실행 중인지 확인 (Windows API)."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong()
+        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        kernel32.CloseHandle(handle)
+        return bool(ok) and exit_code.value == _STILL_ACTIVE
+    except Exception:
+        return False   # 확인 불가 시 잠금을 막지 않음
+
+
+def _release_lock():
+    """정상 종료 시 lockfile 제거 (내 PID일 때만)."""
+    try:
+        if LOCK_FILE.exists() and LOCK_FILE.read_text().strip() == str(os.getpid()):
+            LOCK_FILE.unlink()
+    except OSError:
+        pass
+
+
+def acquire_single_instance_lock():
+    """단일 인스턴스 잠금 획득. 이미 실행 중이면 종료한다 (폴링 충돌 방지)."""
+    if LOCK_FILE.exists():
+        try:
+            existing_pid = int(LOCK_FILE.read_text().strip())
+        except (ValueError, OSError):
+            existing_pid = None
+        if existing_pid and existing_pid != os.getpid() and _pid_alive(existing_pid):
+            logger.error(
+                f"이미 실행 중인 dev 봇이 있습니다 (PID {existing_pid}). "
+                f"폴링 충돌(getUpdates Conflict) 방지를 위해 이 인스턴스를 종료합니다."
+            )
+            sys.exit(1)
+        # 잠금 파일이 있지만 프로세스가 죽음 → 잔여물, 덮어씀
+        logger.warning(f"잔여 lockfile 발견 (PID {existing_pid} 종료됨) — 잠금 재획득")
+    LOCK_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    atexit.register(_release_lock)
+    logger.info(f"단일 인스턴스 잠금 획득 (PID {os.getpid()})")
 
 
 def is_allowed(update: Update) -> bool:
@@ -284,6 +344,8 @@ def main():
         raise ValueError("TELEGRAM_TOKEN 환경변수가 설정되어 있지 않습니다.")
     if not ALLOWED_USER_ID:
         raise ValueError("ALLOWED_USER_ID 환경변수가 설정되어 있지 않습니다.")
+
+    acquire_single_instance_lock()   # 중복 폴링(getUpdates Conflict) 방지
 
     # HTTP 타임아웃을 넉넉히 잡아 일시적 네트워크 지연으로 인한 ReadError/Timed out 발생을 줄인다.
     # get_updates는 long polling(기본 10초)이므로 read timeout을 그보다 충분히 크게 둔다.
