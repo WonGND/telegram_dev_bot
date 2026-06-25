@@ -197,10 +197,22 @@ async def daily_daytrade_job(context: ContextTypes.DEFAULT_TYPE):
     if project is None:
         return
     try:
-        log_path = await asyncio.to_thread(
+        await asyncio.to_thread(
             executor.run, "us_daytrade", project["path"], project.get("timeout"),
             project.get("python"), project.get("args"))
-        msg = f"📈 단타 시뮬 일일 실행\n결과: /log us_daytrade"
+        # run()은 백그라운드 실행이라 직후 로그가 비어 있다.
+        # 실행이 끝날 때까지 기다린 뒤 로그를 읽어 알림 본문에 직접 포함한다.
+        await asyncio.to_thread(executor.wait_for, "us_daytrade", 300)
+        log_text = await asyncio.to_thread(executor.tail_log, "us_daytrade", 40)
+        body = (log_text or "").strip()
+        # 이번 실행분만 보이도록 마지막 '실행 시작' 마커 이후로 자른다(있으면).
+        if "===== 실행 시작" in body:
+            body = body[body.rindex("===== 실행 시작"):]
+        body = body or "(로그 내용 없음)"
+        msg = f"📈 단타 시뮬 일일 실행 완료\n\n{body}"
+        # 텔레그램 메시지 길이 제한(4096자) 대비 안전 컷
+        if len(msg) > 3500:
+            msg = msg[:3500] + "\n…(이하 생략 — 전체는 /log us_daytrade)"
     except Exception as e:
         msg = f"⚠️ 단타 시뮬 실행 오류: {e}"
     try:

@@ -127,6 +127,26 @@ class ProjectExecutor:
         }
         return log_path
 
+    def wait_for(self, project_name, timeout=None):
+        """실행 중인 프로젝트가 끝날 때까지 대기한 뒤 정리한다.
+
+        일회성 작업(일일 시뮬 등)의 출력이 로그에 모두 기록된 뒤 읽기 위해 사용한다.
+        run()은 백그라운드 실행이라 직후에 로그를 읽으면 비어 있을 수 있으므로,
+        run() 다음에 이 메서드로 종료를 기다린 후 tail_log()로 결과를 읽으면 된다.
+        timeout(초) 안에 끝나지 않으면 강제 종료한다. 종료코드를 반환한다(추적 없으면 None)."""
+        info = self.processes.get(project_name)
+        if not info:
+            return None
+        proc = info["process"]
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        rc = proc.returncode
+        self._cleanup(project_name)
+        return rc
+
     def _kill_orphans(self, entry_path):
         """추적하지 못한(봇 재시작 등) 고아 프로세스를 경로로 찾아 강제 종료한다."""
         pids = self._find_pids_by_path(entry_path)
